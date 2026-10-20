@@ -640,14 +640,15 @@ function renderMarkets() {
 
       button.disabled = !marketOpen(m);
 
-      button.addEventListener('click', () => {
-        selection = {
-          id: m.id,
-          choice: i
-        };
+button.addEventListener('click', () => {
+  selection = {
+    id: m.id,
+    choice: i
+  };
 
-        update();
-      });
+  update();
+  openBetSheet();
+});
 
       choices.append(button);
     });
@@ -656,6 +657,52 @@ function renderMarkets() {
     box.append(card);
   }
 }
+
+
+/* =====================================
+   手機版：底部彈出式預測單
+   ===================================== */
+
+function openBetSheet(){
+  if(window.innerWidth > 740) return;
+
+  document.getElementById('betSheet')
+    ?.classList.add('is-open');
+
+  document.getElementById('betSheetBackdrop')
+    ?.classList.add('is-open');
+
+  document.body.classList.add('bet-sheet-open');
+}
+
+function closeBetSheet(){
+  document.getElementById('betSheet')
+    ?.classList.remove('is-open');
+
+  document.getElementById('betSheetBackdrop')
+    ?.classList.remove('is-open');
+
+  document.body.classList.remove('bet-sheet-open');
+}
+
+document.getElementById('closeBetSheet')
+  ?.addEventListener('click',closeBetSheet);
+
+document.getElementById('betSheetBackdrop')
+  ?.addEventListener('click',closeBetSheet);
+
+window.addEventListener('keydown',event=>{
+  if(event.key === 'Escape'){
+    closeBetSheet();
+  }
+});
+
+window.addEventListener('resize',()=>{
+  if(window.innerWidth > 740){
+    closeBetSheet();
+  }
+});
+
 
 // =====================================
 // 預測單
@@ -1153,8 +1200,9 @@ $('placeBet').addEventListener('click', async () => {
     toast('🎉 預測成功！');
 
     selection = null;
-    update();
-
+closeBetSheet();
+update();
+    
   } catch (error) {
     toast('預測失敗：' + error.message);
 
