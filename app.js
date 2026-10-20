@@ -1,30 +1,8 @@
 
-import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js';
-
-import {
-  getAuth,
-  GoogleAuthProvider,
-  signInWithPopup,
-  signOut,
-  onAuthStateChanged
-} from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js';
-
-import {
-  getFirestore,
-  doc,
-  collection,
-  query,
-  where,
-  orderBy,
-  limit,
-  onSnapshot,
-  runTransaction,
-  serverTimestamp,
-  Timestamp,
-  getDocs
-} from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js';
-
-import { firebaseConfig } from './config.js';
+import {initializeApp} from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js';
+import {getAuth,GoogleAuthProvider,signInWithPopup,signOut,onAuthStateChanged} from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js';
+import {getFirestore,doc,collection,query,where,orderBy,limit,onSnapshot,runTransaction,serverTimestamp,Timestamp,getDocs,setDoc} from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js';
+import {firebaseConfig} from './config.js';
 
 // =====================================
 // 基本設定
@@ -34,11 +12,6 @@ const $ = id => document.getElementById(id);
 
 const fmt = n =>
   Number(n || 0).toLocaleString('zh-TW');
-
-const MIN_OPTIONS = 2;
-const MAX_OPTIONS = 16;
-const MIN_ODDS = 1.01;
-const MAX_ODDS = 10;
 
 const allowed = u =>
   !!u &&
@@ -51,7 +24,6 @@ let toastTimer = null;
 
 const toast = s => {
   const el = $('toast');
-
   el.textContent = s;
   el.style.display = 'block';
 
@@ -74,11 +46,216 @@ let selection = null;
 let isAdmin = false;
 let unsubs = [];
 
-let authReady = false;
-let authBusy = false;
+// =====================================
+// 市場投注趨勢
+// =====================================
+
+let marketStats = {};
+let adminAllBets = [];
+let adminBetsUnsub = null;
+let statsPublishTimer = null;
+let statsPublishing = false;
+let statsQueued = false;
+let publishedSignature = '';
+let adminBetsLoaded = false;
+
+const stopAdminStats = () => {
+  if (adminBetsUnsub) {
+    adminBetsUnsub();
+    adminBetsUnsub = null;
+  }
+
+  clearTimeout(statsPublishTimer);
+
+  adminAllBets = [];
+  adminBetsLoaded = false;
+  publishedSignature = '';
+  statsQueued = false;
+};
+
+const statsSignature = () =>
+  JSON.stringify([
+    markets.map(m => [
+      m.id,
+      m.options?.length
+    ]),
+    adminAllBets
+      .map(b => [
+        b.id,
+        b.marketId,
+        b.uid,
+        b.choice,
+        b.amount
+      ])
+      .sort((a, b) =>
+        a[0].localeCompare(b[0])
+      )
+  ]);
+
+// 計算單一賽事的投注統計
+function statsFromBets(m, records) {
+  const amounts =
+    Array(m.options.length).fill(0);
+
+  const members = Array.from(
+    {length: m.options.length},
+    () => new Set()
+  );
+
+  let totalAmount = 0;
+  let totalBets = 0;
+
+  for (const b of records) {
+    if (
+      b.marketId !== m.id ||
+      !Number.isInteger(b.choice) ||
+      b.choice < 0 ||
+      b.choice >= amounts.length ||
+      !Number.isSafeInteger(b.amount) ||
+      b.amount < 0 ||
+      typeof b.uid !== 'string'
+    ) {
+      continue;
+    }
+
+    amounts[b.choice] += b.amount;
+    members[b.choice].add(b.uid);
+
+    totalAmount += b.amount;
+    totalBets++;
+  }
+
+  return {
+    amounts,
+    counts: members.map(set => set.size),
+    totalAmount,
+    totalBets
+  };
+}
+
+// 管理員將統計發布到 Firestore
+async function publishStats(force = false) {
+  if (
+    !user ||
+    !isAdmin ||
+    !adminBetsLoaded ||
+    !markets.length
+  ) {
+    return;
+  }
+
+  if (statsPublishing) {
+    statsQueued = true;
+    return;
+  }
+
+  const sig = statsSignature();
+
+  if (!force && sig === publishedSignature) {
+    return;
+  }
+
+  statsPublishing = true;
+
+  try {
+    for (const m of markets) {
+      if (
+        !Array.isArray(m.options) ||
+        m.options.length < 2
+      ) {
+        continue;
+      }
+
+      const data = statsFromBets(
+        m,
+        adminAllBets
+      );
+
+      await setDoc(
+        doc(db, 'marketStats', m.id),
+        {
+          ...data,
+          updatedAt: serverTimestamp()
+        }
+      );
+    }
+
+    publishedSignature = sig;
+
+    if (force) {
+      toast('市場投注趨勢同步完成！');
+    }
+
+  } catch (e) {
+    toast(
+      '市場統計更新失敗：' +
+      e.message
+    );
+
+  } finally {
+    statsPublishing = false;
+
+    if (statsQueued) {
+      statsQueued = false;
+      queueStatsPublish();
+    }
+  }
+}
+
+function queueStatsPublish() {
+  if (!isAdmin || !adminBetsLoaded) {
+    return;
+  }
+
+  clearTimeout(statsPublishTimer);
+
+  if (statsPublishing) {
+    statsQueued = true;
+    return;
+  }
+
+  statsPublishTimer = setTimeout(
+    () => publishStats(),
+    1300
+  );
+}
+
+// 管理員監聽所有投注
+function startAdminStats() {
+  if (
+    adminBetsUnsub ||
+    !user ||
+    !isAdmin
+  ) {
+    return;
+  }
+
+  adminBetsUnsub = onSnapshot(
+    collection(db, 'bets'),
+
+    snap => {
+      adminAllBets = snap.docs.map(d => ({
+        id: d.id,
+        ...d.data()
+      }));
+
+      adminBetsLoaded = true;
+      queueStatsPublish();
+    },
+
+    e => {
+      adminBetsLoaded = false;
+
+      toast(
+        '管理員統計讀取失敗：' +
+        e.message
+      );
+    }
+  );
+}
 
 // =====================================
-// Firestore 即時監聽
+// Firestore 監聽與工具
 // =====================================
 
 const cleanup = () => {
@@ -90,7 +267,10 @@ const listen = (q, cb) => {
   const unsubscribe = onSnapshot(
     q,
     cb,
-    e => toast('資料讀取失敗：' + e.message)
+    e => toast(
+      '資料讀取失敗：' +
+      e.message
+    )
   );
 
   unsubs.push(unsubscribe);
@@ -124,26 +304,93 @@ const open = m =>
   m.status === 'open' &&
   m.closesAt?.toMillis() > Date.now();
 
-const validOdds = value =>
-  Number.isFinite(value) &&
-  value >= MIN_ODDS &&
-  value <= MAX_ODDS &&
-  Math.abs(
-    value * 100 - Math.round(value * 100)
-  ) < 0.000001;
+// =====================================
+// 市場趨勢 CSS
+// 不需要另外修改 index.html
+// =====================================
+
+const statsCss = document.createElement('style');
+
+statsCss.textContent = `
+.panda-stats {
+  margin-top:18px;
+  padding:15px;
+  background:#10291d;
+  border:1px solid #355543;
+  border-radius:12px;
+}
+
+.panda-stats-heading {
+  font-weight:800;
+  margin-bottom:11px;
+  color:#b4f0c7;
+}
+
+.panda-stats-summary {
+  font-size:13px;
+  margin-bottom:14px;
+  color:#d9f4e2;
+  line-height:1.7;
+}
+
+.panda-stat-line {
+  margin:12px 0;
+}
+
+.panda-stat-top {
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  font-size:13px;
+  margin-bottom:6px;
+}
+
+.panda-stat-top span {
+  overflow-wrap:anywhere;
+}
+
+.panda-stat-top strong {
+  color:#8cf2b2;
+  white-space:nowrap;
+}
+
+.panda-stat-track {
+  height:9px;
+  background:#30483a;
+  border-radius:99px;
+  overflow:hidden;
+  margin-bottom:6px;
+}
+
+.panda-stat-fill {
+  height:100%;
+  background:#81e9a6;
+  border-radius:99px;
+  transition:width .25s;
+}
+
+.panda-stat-foot {
+  color:#a4b7ac;
+  font-size:11px;
+  line-height:1.6;
+  margin-top:14px;
+}
+`;
+
+document.head.append(statsCss);
 
 // =====================================
-// 更新畫面
+// 更新主要畫面
 // =====================================
 
 function update() {
-  const balance = profile?.balance ?? 0;
+  const bal = profile?.balance ?? 0;
 
   $('balance').textContent =
-    '🪙 ' + (profile ? fmt(balance) : '—');
+    '🪙 ' + (profile ? fmt(bal) : '—');
 
   $('statBalance').textContent =
-    profile ? fmt(balance) : '—';
+    profile ? fmt(bal) : '—';
 
   $('statBets').textContent =
     profile ? fmt(bets.length) : '—';
@@ -158,7 +405,132 @@ function update() {
 }
 
 // =====================================
-// 預測市場：支援多選項
+// 顯示各選項投注趨勢
+// =====================================
+
+function renderStats(m) {
+  const box = node(
+    'section',
+    undefined,
+    'panda-stats'
+  );
+
+  box.append(
+    node(
+      'div',
+      '📊 市場投注趨勢',
+      'panda-stats-heading'
+    )
+  );
+
+  const data = marketStats[m.id];
+
+  if (
+    !data ||
+    !Array.isArray(data.amounts) ||
+    data.amounts.length !== m.options.length ||
+    !Array.isArray(data.counts) ||
+    data.counts.length !== m.options.length
+  ) {
+    box.append(
+      node(
+        'div',
+        '統計尚未發布，等待管理員同步。',
+        'small'
+      )
+    );
+
+    return box;
+  }
+
+  const total =
+    Number(data.totalAmount) || 0;
+
+  box.append(
+    node(
+      'div',
+      `總投注額：🪙 ${fmt(total)}｜投注筆數：${fmt(data.totalBets)}`,
+      'panda-stats-summary'
+    )
+  );
+
+  m.options.forEach((name, i) => {
+    const amount =
+      Number(data.amounts[i]) || 0;
+
+    const people =
+      Number(data.counts[i]) || 0;
+
+    const percent =
+      total > 0
+        ? amount / total * 100
+        : 0;
+
+    const line = node(
+      'div',
+      undefined,
+      'panda-stat-line'
+    );
+
+    const top = node(
+      'div',
+      undefined,
+      'panda-stat-top'
+    );
+
+    top.append(
+      node('span', name),
+      node(
+        'strong',
+        percent.toFixed(1) + '%'
+      )
+    );
+
+    const track = node(
+      'div',
+      undefined,
+      'panda-stat-track'
+    );
+
+    const fill = node(
+      'div',
+      undefined,
+      'panda-stat-fill'
+    );
+
+    fill.style.width =
+      percent.toFixed(3) + '%';
+
+    track.append(fill);
+
+    line.append(
+      top,
+      track,
+      node(
+        'div',
+        `🪙 ${fmt(amount)}｜${fmt(people)} 位不重複玩家`,
+        'small'
+      )
+    );
+
+    box.append(line);
+  });
+
+  box.append(
+    node(
+      'div',
+      '資料更新：' +
+        dateText(data.updatedAt) +
+        '｜依累計投注金額計算；同一玩家可支持多個選項',
+      'panda-stat-foot'
+    )
+  );
+
+  return box;
+}
+
+// =====================================
+// 預測市場
 // =====================================
 
 function renderMarkets() {
@@ -166,12 +538,14 @@ function renderMarkets() {
   box.replaceChildren();
 
   if (!user) {
-    box.textContent = '請先使用 Google 帳號登入';
+    box.textContent =
+      '請先使用 Google 帳號登入';
     return;
   }
 
   if (!markets.length) {
-    box.textContent = '尚無賽事，等待管理員建立。';
+    box.textContent =
+      '尚無賽事，等待管理員建立。';
     return;
   }
 
@@ -190,11 +564,18 @@ function renderMarkets() {
           : '🔒 已封盤';
 
     card.append(
-      node('div', statusText, 'small'),
-      node('h3', m.title),
       node(
         'div',
-        '封盤：' + dateText(m.closesAt),
+        statusText,
+        'small'
+      ),
+
+      node('h3', m.title),
+
+      node(
+        'div',
+        '封盤：' +
+          dateText(m.closesAt),
         'small'
       )
     );
@@ -205,53 +586,51 @@ function renderMarkets() {
       'choices'
     );
 
-    const options = Array.isArray(m.options)
-      ? m.options
-      : [];
+    (m.options || []).forEach(
+      (opt, i) => {
+        const selected =
+          selection?.id === m.id &&
+          selection.choice === i;
 
-    options.forEach((option, index) => {
-      const selected =
-        selection?.id === m.id &&
-        selection.choice === index;
+        const b = node(
+          'button',
+          undefined,
+          'choice' +
+            (selected ? ' selected' : '')
+        );
 
-      const button = node(
-        'button',
-        undefined,
-        'choice' + (selected ? ' selected' : '')
-      );
+        b.type = 'button';
 
-      button.type = 'button';
+        b.append(
+          node('span', opt),
+          node(
+            'b',
+            Number(
+              odds(m)[i] ?? 1.8
+            ).toFixed(2)
+          )
+        );
 
-      const optionName = node(
-        'span',
-        option
-      );
+        b.disabled = !open(m);
 
-      const optionOdds = node(
-        'b',
-        Number(odds(m)[index] ?? 1.8).toFixed(2)
-      );
+        b.onclick = () => {
+          selection = {
+            id: m.id,
+            choice: i
+          };
 
-      button.append(
-        optionName,
-        optionOdds
-      );
-
-      button.disabled = !open(m);
-
-      button.onclick = () => {
-        selection = {
-          id: m.id,
-          choice: index
+          update();
         };
 
-        update();
-      };
+        choices.append(b);
+      }
+    );
 
-      choices.append(button);
-    });
+    card.append(
+      choices,
+      renderStats(m)
+    );
 
-    card.append(choices);
     box.append(card);
   }
 }
@@ -289,8 +668,9 @@ function renderSelection() {
     return;
   }
 
-  const selectedOdds =
-    Number(odds(m)[selection.choice] ?? 1.8);
+  const o = Number(
+    odds(m)[selection.choice]
+  );
 
   const amount =
     Number($('amount').value) || 0;
@@ -301,15 +681,15 @@ function renderSelection() {
     m.options[selection.choice];
 
   $('selectedOdds').textContent =
-    selectedOdds.toFixed(2);
+    o.toFixed(2);
 
   $('estimated').textContent =
     '🪙 ' +
-    fmt(Math.floor(amount * selectedOdds));
+    fmt(Math.floor(amount * o));
 }
 
 // =====================================
-// 我的預測紀錄
+// 我的投注紀錄
 // =====================================
 
 function renderBets() {
@@ -339,7 +719,7 @@ function renderBets() {
 
     const optionName =
       m?.options?.[b.choice] ??
-      `選項 ${b.choice + 1}`;
+      `選項 ${Number(b.choice) + 1}`;
 
     const statusName = {
       pending: '待結算',
@@ -355,7 +735,7 @@ function renderBets() {
 
       node(
         'div',
-        `選擇：${optionName}｜投入 ${fmt(b.amount)} 幣｜固定賠率 ${Number(b.odds).toFixed(2)}`,
+        `選擇：${optionName}｜投入 ${fmt(b.amount)} 幣｜固定賠率 ${b.odds}`,
         'small'
       ),
 
@@ -388,7 +768,7 @@ function renderRanking(docs) {
     return;
   }
 
-  docs.forEach((u, index) => {
+  docs.forEach((u, i) => {
     const row = node(
       'div',
       undefined,
@@ -398,7 +778,7 @@ function renderRanking(docs) {
     row.append(
       node(
         'span',
-        `${index + 1}. ${u.name || '匿名熊貓'}`
+        `${i + 1}. ${u.name || '匿名熊貓'}`
       ),
 
       node(
@@ -428,46 +808,51 @@ async function settleBet(b, m) {
     b.uid
   );
 
-  await runTransaction(db, async tx => {
-    const [betSnap, userSnap] =
-      await Promise.all([
-        tx.get(betRef),
-        tx.get(userRef)
-      ]);
+  await runTransaction(
+    db,
+    async tx => {
+      const [betSnap, userSnap] =
+        await Promise.all([
+          tx.get(betRef),
+          tx.get(userRef)
+        ]);
 
-    if (
-      !betSnap.exists() ||
-      betSnap.data().status !== 'pending' ||
-      !userSnap.exists()
-    ) {
-      return;
+      if (
+        !betSnap.exists() ||
+        betSnap.data().status !== 'pending' ||
+        !userSnap.exists()
+      ) {
+        return;
+      }
+
+      const betData = betSnap.data();
+
+      const payout =
+        betData.choice === m.result
+          ? Math.trunc(
+              betData.amount *
+              betData.odds
+            )
+          : 0;
+
+      tx.update(betRef, {
+        status: payout ? 'won' : 'lost',
+        payout
+      });
+
+      tx.update(userRef, {
+        balance:
+          userSnap.data().balance +
+          payout,
+
+        lastSettleId: b.id
+      });
     }
-
-    const betData = betSnap.data();
-
-    const payout =
-      betData.choice === m.result
-        ? Math.trunc(
-            betData.amount * betData.odds
-          )
-        : 0;
-
-    tx.update(betRef, {
-      status: payout ? 'won' : 'lost',
-      payout
-    });
-
-    tx.update(userRef, {
-      balance:
-        userSnap.data().balance + payout,
-
-      lastSettleId: b.id
-    });
-  });
+  );
 }
 
 // =====================================
-// 批次逐筆結算
+// 批次結算
 // =====================================
 
 async function settleAll(m) {
@@ -490,7 +875,9 @@ async function settleAll(m) {
     let count = 0;
 
     for (const d of snap.docs) {
-      if (d.data().status === 'pending') {
+      if (
+        d.data().status === 'pending'
+      ) {
         await settleBet(
           {
             id: d.id,
@@ -516,7 +903,7 @@ async function settleAll(m) {
 }
 
 // =====================================
-// 管理員賽事列表
+// 管理後台賽事列表
 // =====================================
 
 function renderAdmin() {
@@ -545,53 +932,68 @@ function renderAdmin() {
     );
 
     if (m.status === 'open') {
-      const button = node(
+      const b = node(
         'button',
         '🔒 立即封盤',
         'btn'
       );
 
-      button.onclick = () =>
+      b.onclick = () =>
         actionMarket(m, 'close');
 
-      card.append(button);
+      card.append(b);
     }
 
     if (m.status === 'closed') {
-      m.options.forEach((option, index) => {
-        const button = node(
-          'button',
-          `公布結果：${option}`,
-          'btn'
-        );
-
-        button.style.marginRight = '8px';
-        button.style.marginBottom = '8px';
-
-        button.onclick = () =>
-          actionMarket(
-            m,
-            'settle',
-            index
+      (m.options || []).forEach(
+        (opt, i) => {
+          const b = node(
+            'button',
+            `公布結果：${opt}`,
+            'btn'
           );
 
-        card.append(button);
-      });
+          b.style.marginRight = '8px';
+          b.style.marginBottom = '8px';
+
+          b.onclick = () =>
+            actionMarket(
+              m,
+              'settle',
+              i
+            );
+
+          card.append(b);
+        }
+      );
     }
 
     if (m.status === 'settled') {
-      const button = node(
+      const b = node(
         'button',
         '💰 發放／補發虛擬幣',
         'btn'
       );
 
-      button.onclick = () =>
+      b.onclick = () =>
         settleAll(m);
 
-      card.append(button);
+      card.append(b);
     }
 
+    const statsButton = node(
+      'button',
+      '📊 立即同步投注趨勢',
+      'btn'
+    );
+
+    statsButton.style.margin =
+      '8px 8px 0 0';
+
+    statsButton.onclick = () =>
+      publishStats(true);
+
+    card.append(statsButton);
     box.append(card);
   }
 }
@@ -627,22 +1029,24 @@ async function actionMarket(
         const snap =
           await tx.get(marketRef);
 
-        const expectedStatus =
+        const expected =
           type === 'close'
             ? 'open'
             : 'closed';
 
         if (
           !snap.exists() ||
-          snap.data().status !== expectedStatus
+          snap.data().status !== expected
         ) {
-          throw Error('賽事狀態已變更');
+          throw Error(
+            '賽事狀態已變更'
+          );
         }
 
         tx.update(
           marketRef,
           type === 'close'
-            ? { status: 'closed' }
+            ? {status: 'closed'}
             : {
                 status: 'settled',
                 result
@@ -662,67 +1066,76 @@ async function actionMarket(
 // Google 登入
 // =====================================
 
-const authButton = $('authButton');
+const authButton =
+  $('authButton');
+
+let authReady = false;
+let authBusy = false;
 
 authButton.disabled = true;
-authButton.textContent = '登入載入中…';
+authButton.textContent =
+  '登入載入中…';
 
-authButton.onclick = async () => {
-  if (!authReady || authBusy) {
-    return;
-  }
+authButton.onclick =
+  async () => {
+    if (
+      !authReady ||
+      authBusy
+    ) {
+      return;
+    }
 
-  authBusy = true;
-  authButton.disabled = true;
+    authBusy = true;
+    authButton.disabled = true;
 
-  try {
-    if (auth.currentUser) {
-      await signOut(auth);
-
-    } else {
-      const provider =
-        new GoogleAuthProvider();
-
-      provider.setCustomParameters({
-        prompt: 'select_account'
-      });
-
-      const result =
-        await signInWithPopup(
-          auth,
-          provider
-        );
-
-      if (!allowed(result.user)) {
+    try {
+      if (auth.currentUser) {
         await signOut(auth);
 
+      } else {
+        const provider =
+          new GoogleAuthProvider();
+
+        provider.setCustomParameters({
+          prompt: 'select_account'
+        });
+
+        const result =
+          await signInWithPopup(
+            auth,
+            provider
+          );
+
+        if (!allowed(result.user)) {
+          await signOut(auth);
+
+          toast(
+            '請使用已驗證的 Google 帳號登入'
+          );
+        }
+      }
+
+    } catch (e) {
+      if (
+        e.code !==
+          'auth/popup-closed-by-user' &&
+        e.code !==
+          'auth/cancelled-popup-request'
+      ) {
         toast(
-          '請使用已驗證的 Google 帳號登入'
+          'Google 登入失敗：' +
+          e.message
         );
       }
-    }
 
-  } catch (e) {
-    if (
-      e.code !==
-        'auth/popup-closed-by-user' &&
-      e.code !==
-        'auth/cancelled-popup-request'
-    ) {
-      toast(
-        'Google 登入失敗：' +
-        e.message
-      );
+    } finally {
+      authBusy = false;
+      authButton.disabled = !authReady;
     }
-
-  } finally {
-    authBusy = false;
-    authButton.disabled = !authReady;
-  }
-};
+  };
 
 // =====================================
-// Firebase 登入狀態監聽
+// 登入狀態與資料監聽
 // =====================================
 
 onAuthStateChanged(
@@ -734,12 +1147,17 @@ onAuthStateChanged(
     if (u && !allowed(u)) {
       await signOut(auth);
 
-      toast('Google 帳號驗證失敗');
+      toast(
+        'Google 帳號驗證失敗'
+      );
+
       return;
     }
 
     cleanup();
+    stopAdminStats();
 
+    marketStats = {};
     user = u;
     profile = null;
     markets = [];
@@ -748,7 +1166,8 @@ onAuthStateChanged(
     isAdmin = false;
 
     $('who').textContent =
-      u?.displayName || '尚未登入';
+      u?.displayName ||
+      '尚未登入';
 
     authButton.textContent =
       u ? '登出' : 'Google 登入';
@@ -777,30 +1196,42 @@ onAuthStateChanged(
             await tx.get(userRef);
 
           if (!snap.exists()) {
-            tx.set(userRef, {
-              name:
-                (
-                  u.displayName ||
-                  '熊貓玩家'
-                ).slice(0, 80),
+            tx.set(
+              userRef,
+              {
+                name:
+                  (
+                    u.displayName ||
+                    '熊貓玩家'
+                  ).slice(0, 80),
 
-              balance: 10000,
-              lastBetId: '',
-              lastSettleId: '',
-              createdAt:
-                serverTimestamp()
-            });
+                balance: 10000,
+                lastBetId: '',
+                lastSettleId: '',
+                createdAt:
+                  serverTimestamp()
+              }
+            );
           }
         }
       );
 
-      listen(userRef, snap => {
-        profile = snap.data();
-        update();
-      });
-
+      // 玩家餘額
       listen(
-        collection(db, 'markets'),
+        userRef,
+        snap => {
+          profile = snap.data();
+          update();
+        }
+      );
+
+      // 所有預測賽事
+      listen(
+        collection(
+          db,
+          'markets'
+        ),
+
         snap => {
           markets = snap.docs.map(
             d => ({
@@ -822,14 +1253,46 @@ onAuthStateChanged(
           );
 
           update();
+          queueStatsPublish();
         }
       );
 
+      // 公開市場統計
+      listen(
+        collection(
+          db,
+          'marketStats'
+        ),
+
+        snap => {
+          marketStats =
+            Object.fromEntries(
+              snap.docs.map(
+                d => [
+                  d.id,
+                  d.data()
+                ]
+              )
+            );
+
+          renderMarkets();
+        }
+      );
+
+      // 自己的投注紀錄
       listen(
         query(
-          collection(db, 'bets'),
-          where('uid', '==', u.uid)
+          collection(
+            db,
+            'bets'
+          ),
+          where(
+            'uid',
+            '==',
+            u.uid
+          )
         ),
+
         snap => {
           bets = snap.docs
             .map(d => ({
@@ -852,15 +1315,22 @@ onAuthStateChanged(
         }
       );
 
+      // 熊貓幣排行榜
       listen(
         query(
-          collection(db, 'users'),
+          collection(
+            db,
+            'users'
+          ),
+
           orderBy(
             'balance',
             'desc'
           ),
+
           limit(50)
         ),
+
         snap => {
           renderRanking(
             snap.docs.map(
@@ -870,12 +1340,14 @@ onAuthStateChanged(
         }
       );
 
+      // 管理員身分
       listen(
         doc(
           db,
           'admins',
           u.uid
         ),
+
         snap => {
           isAdmin = snap.exists();
 
@@ -885,6 +1357,13 @@ onAuthStateChanged(
           );
 
           renderAdmin();
+
+          if (isAdmin) {
+            startAdminStats();
+
+          } else {
+            stopAdminStats();
+          }
         }
       );
 
@@ -903,11 +1382,10 @@ onAuthStateChanged(
 
 document
   .querySelectorAll('[data-tab]')
-  .forEach(button => {
-    button.onclick = () => {
+  .forEach(b => {
+    b.onclick = () => {
       if (
-        button.dataset.tab ===
-          'admin' &&
+        b.dataset.tab === 'admin' &&
         !isAdmin
       ) {
         return;
@@ -920,7 +1398,7 @@ document
         .forEach(x => {
           x.classList.toggle(
             'active',
-            x === button
+            x === b
           );
         });
 
@@ -932,8 +1410,7 @@ document
       ].forEach(id => {
         $(id).classList.toggle(
           'hidden',
-          id !==
-            button.dataset.tab
+          id !== b.dataset.tab
         );
       });
     };
@@ -950,17 +1427,17 @@ document
   .querySelectorAll(
     '[data-amount]'
   )
-  .forEach(button => {
-    button.onclick = () => {
+  .forEach(b => {
+    b.onclick = () => {
       $('amount').value =
-        button.dataset.amount;
+        b.dataset.amount;
 
       renderSelection();
     };
   });
 
 // =====================================
-// 玩家確認預測
+// 玩家確認投注
 // =====================================
 
 $('placeBet').onclick =
@@ -988,7 +1465,7 @@ $('placeBet').onclick =
       amount % 10 !== 0
     ) {
       toast(
-        '每筆限 10～10,000 幣，且為 10 的倍數，請確認賽事及選項'
+        '請選擇有效選項；每筆限 10～10,000 幣，且為 10 的倍數'
       );
 
       return;
@@ -1010,10 +1487,10 @@ $('placeBet').onclick =
       return;
     }
 
-    const button =
+    const btn =
       $('placeBet');
 
-    button.disabled = true;
+    btn.disabled = true;
 
     try {
       const betRef = doc(
@@ -1035,15 +1512,15 @@ $('placeBet').onclick =
       await runTransaction(
         db,
         async tx => {
-          const [userSnap, marketSnap] =
+          const [us, ms] =
             await Promise.all([
               tx.get(userRef),
               tx.get(marketRef)
             ]);
 
           if (
-            !userSnap.exists() ||
-            !marketSnap.exists()
+            !us.exists() ||
+            !ms.exists()
           ) {
             throw Error(
               '找不到玩家或賽事資料'
@@ -1051,75 +1528,71 @@ $('placeBet').onclick =
           }
 
           const marketData =
-            marketSnap.data();
+            ms.data();
 
           if (
-            userSnap.data().balance <
+            us.data().balance <
               amount ||
             marketData.status !==
               'open' ||
             marketData.closesAt.toMillis() <=
-              Date.now()
-          ) {
-            throw Error(
-              '餘額不足或賽事已封盤'
-            );
-          }
-
-          if (
+              Date.now() ||
             !Array.isArray(
               marketData.options
             ) ||
             choice >=
-              marketData.options.length
+              marketData.options.length ||
+            marketData.options[choice] !==
+              m.options[choice]
           ) {
             throw Error(
-              '預測選項無效'
+              '餘額不足、選項已變更或賽事已封盤'
             );
           }
 
-          const marketOdds =
-            Array.isArray(
-              marketData.odds
-            )
-              ? marketData.odds
-              : [1.8, 1.8];
-
-          const selectedOdds =
-            Number(
-              marketOdds[choice]
-            );
+          const o =
+            (
+              marketData.odds ||
+              [1.8, 1.8]
+            )[choice];
 
           if (
-            !validOdds(
-              selectedOdds
-            )
+            typeof o !== 'number' ||
+            !Number.isFinite(o) ||
+            o < 1.01 ||
+            o > 10
           ) {
             throw Error(
-              '賽事賠率設定無效'
+              '賠率資料異常'
             );
           }
 
-          tx.set(betRef, {
-            uid: user.uid,
-            marketId: m.id,
-            choice,
-            amount,
-            odds: selectedOdds,
-            payout: 0,
-            status: 'pending',
-            createdAt:
-              serverTimestamp()
-          });
-
-          tx.update(userRef, {
-            balance:
-              userSnap.data().balance -
+          tx.set(
+            betRef,
+            {
+              uid: user.uid,
+              marketId: m.id,
+              choice,
               amount,
+              odds: o,
+              payout: 0,
+              status: 'pending',
+              createdAt:
+                serverTimestamp()
+            }
+          );
 
-            lastBetId:
-              betRef.id
-          });
+          tx.update(
+            userRef,
+            {
+              balance:
+                us.data().balance -
+                amount,
+
+              lastBetId:
+                betRef.id
+            }
+          );
         }
       );
 
@@ -1137,73 +1610,105 @@ $('placeBet').onclick =
       );
 
     } finally {
-      button.disabled = false;
+      btn.disabled = false;
     }
   };
 
 // =====================================
-// 管理員：動態新增／刪除選項
+// 管理員：動態新增與移除選項
 // =====================================
 
-const adminOptions =
+const optionBox =
   $('adminOptions');
 
 const addOptionButton =
   $('addMarketOption');
 
-function optionLabel(index) {
-  return String.fromCharCode(
-    65 + index
-  );
-}
+const MAX_OPTIONS = 16;
 
-function refreshAdminOptions() {
-  const cards = [
-    ...adminOptions.querySelectorAll(
+let nextOptionId = 2;
+
+function optionCards() {
+  return Array.from(
+    optionBox.querySelectorAll(
       '.admin-option'
     )
-  ];
-
-  cards.forEach(
-    (card, index) => {
-      const title =
-        card.querySelector(
-          '.admin-option-actions strong'
-        );
-
-      if (title) {
-        title.textContent =
-          `選項 ${optionLabel(index)}`;
-      }
-
-      const removeButton =
-        card.querySelector(
-          '.admin-option-remove'
-        );
-
-      if (removeButton) {
-        removeButton.disabled =
-          cards.length <=
-          MIN_OPTIONS;
-      }
-    }
   );
-
-  addOptionButton.disabled =
-    cards.length >=
-    MAX_OPTIONS;
-
-  addOptionButton.textContent =
-    cards.length >=
-    MAX_OPTIONS
-      ? '已達 16 個選項上限'
-      : `＋ 新增一個選項（目前 ${cards.length}/${MAX_OPTIONS}）`;
 }
 
-function createAdminOption(
-  name = '',
-  odd = '1.80'
-) {
+function refreshOptionLabels() {
+  const cards = optionCards();
+
+  cards.forEach((card, i) => {
+    const heading =
+      card.querySelector(
+        '.admin-option-actions strong'
+      );
+
+    if (heading) {
+      heading.textContent =
+        `選項 ${i + 1}`;
+    }
+
+    let remove =
+      card.querySelector(
+        '.admin-option-remove'
+      );
+
+    if (!remove) {
+      remove = node(
+        'button',
+        '移除',
+        'btn admin-option-remove'
+      );
+
+      remove.type = 'button';
+
+      card
+        .querySelector(
+          '.admin-option-actions'
+        )
+        .append(remove);
+    }
+
+    remove.disabled =
+      cards.length <= 2;
+
+    remove.onclick = () => {
+      if (
+        optionCards().length <= 2
+      ) {
+        return;
+      }
+
+      card.remove();
+      refreshOptionLabels();
+    };
+  });
+
+  addOptionButton.disabled =
+    cards.length >= MAX_OPTIONS;
+
+  addOptionButton.textContent =
+    cards.length >= MAX_OPTIONS
+      ? '已達 16 個選項上限'
+      : '＋ 新增一個選項';
+}
+
+addOptionButton.onclick = () => {
+  if (
+    optionCards().length >=
+    MAX_OPTIONS
+  ) {
+    toast(
+      '每場最多 16 個選項'
+    );
+
+    return;
+  }
+
+  const id = nextOptionId++;
+
   const card = node(
     'div',
     undefined,
@@ -1216,45 +1721,8 @@ function createAdminOption(
     'admin-option-actions'
   );
 
-  const title = node(
-    'strong',
-    '新增選項'
-  );
-
-  const removeButton = node(
-    'button',
-    '移除',
-    'btn admin-option-remove'
-  );
-
-  removeButton.type =
-    'button';
-
-  removeButton.onclick =
-    () => {
-      const count =
-        adminOptions.querySelectorAll(
-          '.admin-option'
-        ).length;
-
-      if (
-        count <=
-        MIN_OPTIONS
-      ) {
-        toast(
-          '每場賽事至少需要兩個選項'
-        );
-
-        return;
-      }
-
-      card.remove();
-      refreshAdminOptions();
-    };
-
   actions.append(
-    title,
-    removeButton
+    node('strong', '新選項')
   );
 
   const nameLabel = node(
@@ -1262,60 +1730,46 @@ function createAdminOption(
     '選項名稱'
   );
 
+  nameLabel.htmlFor =
+    `optionName${id}`;
+
   const nameInput = node(
-    'input'
+    'input',
+    undefined,
+    'field'
   );
 
-  nameInput.className =
-    'field';
+  nameInput.id =
+    `optionName${id}`;
 
-  nameInput.type =
-    'text';
-
-  nameInput.maxLength =
-    40;
+  nameInput.maxLength = 40;
 
   nameInput.placeholder =
     '例如：T1';
-
-  nameInput.value =
-    name;
-
-  nameInput.dataset.field =
-    'option-name';
 
   const oddsLabel = node(
     'label',
     '賠率'
   );
 
+  oddsLabel.htmlFor =
+    `optionOdds${id}`;
+
   const oddsInput = node(
-    'input'
+    'input',
+    undefined,
+    'field'
   );
 
-  oddsInput.className =
-    'field';
+  oddsInput.id =
+    `optionOdds${id}`;
 
-  oddsInput.type =
-    'number';
-
-  oddsInput.min =
-    '1.01';
-
-  oddsInput.max =
-    '10';
-
-  oddsInput.step =
-    '0.01';
-
-  oddsInput.inputMode =
-    'decimal';
-
-  oddsInput.value =
-    odd;
-
-  oddsInput.dataset.field =
-    'option-odds';
+  oddsInput.type = 'number';
+  oddsInput.min = '1.01';
+  oddsInput.max = '10';
+  oddsInput.step = '0.01';
+  oddsInput.value = '1.80';
+  oddsInput.inputMode = 'decimal';
 
   card.append(
     actions,
@@ -1325,119 +1779,13 @@ function createAdminOption(
     oddsInput
   );
 
-  return card;
-}
+  optionBox.append(card);
 
-// 原本 HTML 內建的 A、B 選項
-// 保留原本輸入框，避免影響舊版結構
-function initializeAdminOptions() {
-  const existingCards = [
-    ...adminOptions.querySelectorAll(
-      '.admin-option'
-    )
-  ];
+  refreshOptionLabels();
+  nameInput.focus();
+};
 
-  existingCards.forEach(
-    card => {
-      const nameInput =
-        card.querySelector(
-          'input:not([type="number"])'
-        );
-
-      const oddsInput =
-        card.querySelector(
-          'input[type="number"]'
-        );
-
-      if (nameInput) {
-        nameInput.dataset.field =
-          'option-name';
-      }
-
-      if (oddsInput) {
-        oddsInput.dataset.field =
-          'option-odds';
-      }
-
-      const actions =
-        card.querySelector(
-          '.admin-option-actions'
-        );
-
-      if (
-        actions &&
-        !actions.querySelector(
-          '.admin-option-remove'
-        )
-      ) {
-        const removeButton =
-          node(
-            'button',
-            '移除',
-            'btn admin-option-remove'
-          );
-
-        removeButton.type =
-          'button';
-
-        removeButton.onclick =
-          () => {
-            const count =
-              adminOptions.querySelectorAll(
-                '.admin-option'
-              ).length;
-
-            if (
-              count <=
-              MIN_OPTIONS
-            ) {
-              toast(
-                '每場賽事至少需要兩個選項'
-              );
-
-              return;
-            }
-
-            card.remove();
-            refreshAdminOptions();
-          };
-
-        actions.append(
-          removeButton
-        );
-      }
-    }
-  );
-
-  refreshAdminOptions();
-}
-
-addOptionButton.onclick =
-  () => {
-    const count =
-      adminOptions.querySelectorAll(
-        '.admin-option'
-      ).length;
-
-    if (
-      count >=
-      MAX_OPTIONS
-    ) {
-      toast(
-        '每場賽事最多 16 個選項'
-      );
-
-      return;
-    }
-
-    adminOptions.append(
-      createAdminOption()
-    );
-
-    refreshAdminOptions();
-  };
-
-initializeAdminOptions();
+refreshOptionLabels();
 
 // =====================================
 // 管理員：建立多選項賽事
@@ -1445,7 +1793,7 @@ initializeAdminOptions();
 
 $('createMarket').onclick =
   async () => {
-    if (!user || !isAdmin) {
+    if (!isAdmin) {
       toast(
         '只有管理員可以建立賽事'
       );
@@ -1459,71 +1807,51 @@ $('createMarket').onclick =
     const local =
       $('newClose').value;
 
-    const cards = [
-      ...adminOptions.querySelectorAll(
-        '.admin-option'
-      )
-    ];
+    const cards =
+      optionCards();
 
-    const options = [];
-    const customOdds = [];
-
-    for (const card of cards) {
-      const nameInput =
+    const options = cards.map(
+      card =>
         card.querySelector(
-          '[data-field="option-name"]'
-        );
+          'input:not([type="number"])'
+        )?.value.trim() ?? ''
+    );
 
-      const oddsInput =
-        card.querySelector(
-          '[data-field="option-odds"]'
-        );
+    const oddsInputs =
+      cards.map(
+        card =>
+          card.querySelector(
+            'input[type="number"]'
+          )
+      );
 
-      const name =
-        nameInput?.value.trim() ||
-        '';
+    const customOdds =
+      oddsInputs.map(
+        input =>
+          Number(input?.value)
+      );
 
-      const rawOdds =
-        oddsInput?.value.trim() ||
-        '';
-
-      const odd =
-        Number(rawOdds);
-
-      if (
-        !name ||
-        name.length > 40
-      ) {
-        toast(
-          '每個選項都必須填寫名稱，最多 40 字'
-        );
-
-        return;
-      }
-
-      if (
-        !rawOdds ||
-        !validOdds(odd)
-      ) {
-        toast(
-          '賠率請輸入 1.01～10.00，最多兩位小數'
-        );
-
-        return;
-      }
-
-      options.push(name);
-      customOdds.push(odd);
-    }
+    const closeDate =
+      new Date(local);
 
     if (
-      cards.length <
-        MIN_OPTIONS ||
-      cards.length >
-        MAX_OPTIONS
+      title.length < 4 ||
+      title.length > 120 ||
+      !local ||
+      Number.isNaN(
+        closeDate.getTime()
+      ) ||
+      closeDate <= new Date() ||
+      cards.length < 2 ||
+      cards.length > MAX_OPTIONS ||
+      !options.every(
+        x =>
+          x.length > 0 &&
+          x.length <= 40
+      )
     ) {
       toast(
-        '每場賽事必須設定 2～16 個選項'
+        '請填寫有效的賽事資料、2～16 個選項及未來封盤時間'
       );
 
       return;
@@ -1540,38 +1868,45 @@ $('createMarket').onclick =
       return;
     }
 
-    const closeDate =
-      new Date(local);
+    const oddsValid =
+      customOdds.every(
+        o =>
+          Number.isFinite(o) &&
+          o >= 1.01 &&
+          o <= 10 &&
+          Math.abs(
+            o * 100 -
+            Math.round(o * 100)
+          ) < 0.000001
+      );
 
     if (
-      title.length < 4 ||
-      title.length > 120 ||
-      !local ||
-      !Number.isFinite(
-        closeDate.getTime()
+      oddsInputs.some(
+        input =>
+          !input ||
+          input.value.trim() === ''
       ) ||
-      closeDate <= new Date()
+      !oddsValid
     ) {
       toast(
-        '請填寫有效的賽事標題及未來封盤時間'
+        '賠率請輸入 1.01～10.00，最多兩位小數'
       );
 
       return;
     }
 
-    const button =
+    const btn =
       $('createMarket');
 
-    button.disabled = true;
+    btn.disabled = true;
 
     try {
-      const marketRef =
-        doc(
-          collection(
-            db,
-            'markets'
-          )
-        );
+      const marketRef = doc(
+        collection(
+          db,
+          'markets'
+        )
+      );
 
       await runTransaction(
         db,
@@ -1581,12 +1916,15 @@ $('createMarket').onclick =
             {
               title,
               options,
+
               closesAt:
                 Timestamp.fromDate(
                   closeDate
                 ),
+
               status: 'open',
               odds: customOdds,
+
               createdAt:
                 serverTimestamp()
             }
@@ -1595,25 +1933,10 @@ $('createMarket').onclick =
       );
 
       toast(
-        '多選項賽事建立完成！'
+        '賽事建立完成！'
       );
 
-      $('newTitle').value =
-        '';
-
-      // 建立完成後恢復為預設兩個選項
-      adminOptions.replaceChildren(
-        createAdminOption(
-          '會',
-          '1.80'
-        ),
-        createAdminOption(
-          '不會',
-          '1.80'
-        )
-      );
-
-      refreshAdminOptions();
+      $('newTitle').value = '';
 
     } catch (e) {
       toast(
@@ -1622,13 +1945,12 @@ $('createMarket').onclick =
       );
 
     } finally {
-      button.disabled =
-        false;
+      btn.disabled = false;
     }
   };
 
 // =====================================
-// 每 30 秒更新市場狀態
+// 定期更新封盤狀態
 // =====================================
 
 setInterval(
