@@ -26,5 +26,70 @@ onAuthStateChanged(auth,async u=>{if(u&&!allowed(u)){await signOut(auth);toast('
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{if(b.dataset.tab==='admin'&&!isAdmin)return;document.querySelectorAll('[data-tab]').forEach(x=>x.classList.toggle('active',x===b));['home','bets','ranking','admin'].forEach(id=>$(id).classList.toggle('hidden',id!==b.dataset.tab))});
 $('amount').oninput=renderSelection;document.querySelectorAll('[data-amount]').forEach(b=>b.onclick=()=>{$('amount').value=b.dataset.amount;renderSelection()});
 $('placeBet').onclick=async()=>{const m=markets.find(x=>x.id===selection?.id),amount=Number($('amount').value);if(!m||!open(m)||!Number.isSafeInteger(amount)||amount<10||amount>10000||amount%10!==0){toast('每筆限 10～10,000 幣，且為 10 的倍數');return}if(amount>(profile?.balance||0)){toast('熊貓幣不足');return}if(!confirm(`確認投入 ${fmt(amount)} 幣預測「${m.options[selection.choice]}」？`))return;const btn=$('placeBet');btn.disabled=true;try{const bRef=doc(collection(db,'bets')),uRef=doc(db,'users',user.uid),mRef=doc(db,'markets',m.id),choice=selection.choice;await runTransaction(db,async tx=>{const [us,ms]=await Promise.all([tx.get(uRef),tx.get(mRef)]);if(!us.exists()||!ms.exists()||us.data().balance<amount||ms.data().status!=='open'||ms.data().closesAt.toMillis()<=Date.now())throw Error('餘額不足或賽事已封盤');const o=ms.data().odds[choice];tx.set(bRef,{uid:user.uid,marketId:m.id,choice,amount,odds:o,payout:0,status:'pending',createdAt:serverTimestamp()});tx.update(uRef,{balance:us.data().balance-amount,lastBetId:bRef.id})});toast('預測成功！已鎖定固定賠率');selection=null;update()}catch(e){toast('預測失敗：'+e.message)}finally{btn.disabled=false}};
-$('createMarket').onclick=async()=>{const title=$('newTitle').value.trim(),options=[$('newA').value.trim(),$('newB').value.trim()],local=$('newClose').value;if(title.length<4||!options.every(x=>x.length>0&&x.length<=40)||!local||new Date(local)<=new Date()){toast('請填寫有效的賽事資料及未來封盤時間');return}try{const r=doc(collection(db,'markets'));await runTransaction(db,async tx=>{tx.set(r,{title,options,closesAt:Timestamp.fromDate(new Date(local)),status:'open',odds:[1.8,1.8],createdAt:serverTimestamp()})});toast('賽事建立完成');$('newTitle').value=''}catch(e){toast(e.message)}};
+
+$('createMarket').onclick = async () => {
+  const title = $('newTitle').value.trim();
+  const options = [
+    $('newA').value.trim(),
+    $('newB').value.trim()
+  ];
+  const local = $('newClose').value;
+
+  // 讀取管理員設定的 A、B 賠率
+  const oddsA = Number($('newOddsA').value);
+  const oddsB = Number($('newOddsB').value);
+  const customOdds = [oddsA, oddsB];
+
+  // 驗證賽事基本資料
+  if (
+    title.length < 4 ||
+    title.length > 120 ||
+    !options.every(x => x.length > 0 && x.length <= 40) ||
+    !local ||
+    new Date(local) <= new Date()
+  ) {
+    toast('請填寫有效的賽事資料及未來封盤時間');
+    return;
+  }
+
+  // 驗證賠率：1.01～10.00，最多兩位小數
+  const validOdds = customOdds.every(o =>
+    Number.isFinite(o) &&
+    o >= 1.01 &&
+    o <= 10 &&
+    Number.isInteger(Math.round(o * 100)) &&
+    Math.abs(o * 100 - Math.round(o * 100)) < 0.000001
+  );
+
+  if (
+    $('newOddsA').value.trim() === '' ||
+    $('newOddsB').value.trim() === '' ||
+    !validOdds
+  ) {
+    toast('賠率請輸入 1.01～10.00，最多兩位小數');
+    return;
+  }
+
+  try {
+    const r = doc(collection(db, 'markets'));
+
+    await runTransaction(db, async tx => {
+      tx.set(r, {
+        title,
+        options,
+        closesAt: Timestamp.fromDate(new Date(local)),
+        status: 'open',
+        odds: customOdds,
+        createdAt: serverTimestamp()
+      });
+    });
+
+    toast('賽事建立完成！');
+    $('newTitle').value = '';
+
+  } catch (e) {
+    toast('建立賽事失敗：' + e.message);
+  }
+};
+
 setInterval(()=>{if(user)update()},30000);
