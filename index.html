@@ -526,6 +526,97 @@ button:disabled{opacity:.5;cursor:not-allowed}
   }
 }
 
+
+/* =====================================
+   手機版：底部彈出式預測單
+   ===================================== */
+
+.bet-sheet-close{
+  display:none;
+}
+
+@media(max-width:740px){
+
+  /* 手機版預測單預設隱藏 */
+  #betSheet{
+    display:none;
+    position:fixed;
+    left:0;
+    right:0;
+    bottom:0;
+    top:auto;
+    z-index:1001;
+    width:100%;
+    max-height:85dvh;
+    overflow-y:auto;
+    background:#1C2636;
+    border:1px solid #36465D;
+    border-radius:22px 22px 0 0;
+    padding:24px 20px max(24px,env(safe-area-inset-bottom));
+    box-shadow:0 -12px 45px rgba(0,0,0,.5);
+  }
+
+  /* 選擇預測選項後顯示 */
+  #betSheet.is-open{
+    display:block;
+    animation:betSheetSlideUp .25s ease-out;
+  }
+
+  /* 關閉按鈕 */
+  .bet-sheet-close{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    position:absolute;
+    top:17px;
+    right:17px;
+    width:34px;
+    height:34px;
+    border:1px solid #36465D;
+    border-radius:50%;
+    background:#293B53;
+    color:#F0F6FF;
+    font-size:24px;
+    line-height:1;
+    cursor:pointer;
+  }
+
+  #betSheet h2{
+    margin-top:4px;
+    padding-right:40px;
+  }
+
+  /* 背景遮罩 */
+  #betSheetBackdrop{
+    display:none;
+    position:fixed;
+    inset:0;
+    z-index:1000;
+    background:rgba(0,0,0,.65);
+  }
+
+  #betSheetBackdrop.is-open{
+    display:block;
+  }
+
+  body.bet-sheet-open{
+    overflow:hidden;
+  }
+
+  @keyframes betSheetSlideUp{
+    from{
+      transform:translateY(100%);
+      opacity:.7;
+    }
+    to{
+      transform:translateY(0);
+      opacity:1;
+    }
+  }
+}
+
+   
+   
 </style>
 </head>
 
@@ -620,8 +711,15 @@ button:disabled{opacity:.5;cursor:not-allowed}
       </div>
     </main>
 
-    <aside class="card side">
-      <h2>🎟️ 預測單</h2>
+    <aside class="card side" id="betSheet">
+  <button
+    type="button"
+    id="closeBetSheet"
+    class="bet-sheet-close"
+    aria-label="關閉預測單"
+  >×</button>
+
+  <h2>🎟️ 預測單</h2>
 
       <div id="selection" class="muted">
         請先登入並選擇預測選項
@@ -830,7 +928,8 @@ button:disabled{opacity:.5;cursor:not-allowed}
 </div>
 
 <div id="toast" role="status"></div>
-
+<div id="betSheetBackdrop"></div>
+   
 <script type="module" src="./app.js"></script>
 
 </body>
