@@ -50,7 +50,7 @@ let publishedSignature = '';
 let toastTimer = null;
 let grantPlayers = [];
 let grantBusy = false;
-
+const expandedMarketStats = new Set();
 // =====================================
 // 共用工具
 // =====================================
@@ -609,7 +609,30 @@ function renderMarkets() {
         'small'
       )
     );
+// 已公布結果：直接顯示正確答案
+if (
+  m.status === 'settled' &&
+  Number.isInteger(m.result) &&
+  m.result >= 0 &&
+  m.result < (m.options?.length || 0)
+) {
+  const resultBox = element(
+    'div',
+    `🏆 正確答案：${m.options[m.result]}`
+  );
 
+  resultBox.style.background = '#183C53';
+  resultBox.style.border = '1px solid #7DC9F4';
+  resultBox.style.borderRadius = '10px';
+  resultBox.style.padding = '12px 14px';
+  resultBox.style.margin = '12px 0';
+  resultBox.style.color = '#A9DDF8';
+  resultBox.style.fontWeight = '800';
+  resultBox.style.fontSize = '15px';
+
+  card.append(resultBox);
+}
+   
     const choices = element(
       'div',
       null,
@@ -655,7 +678,57 @@ button.addEventListener('click', () => {
       choices.append(button);
     });
 
-    card.append(choices, renderStats(m));
+    card.append(choices);
+
+
+    // 市場投注趨勢：預設收合，保留各賽事展開狀態
+    const statsToggle = element(
+      'button',
+      '',
+      'btn'
+    );
+
+    statsToggle.type = 'button';
+    statsToggle.style.width = '100%';
+    statsToggle.style.marginTop = '14px';
+    statsToggle.style.textAlign = 'center';
+
+    const statsContent = element('div');
+
+    function refreshStatsDisplay() {
+      const expanded = expandedMarketStats.has(m.id);
+
+      statsContent.classList.toggle('hidden', !expanded);
+
+      statsToggle.textContent = expanded
+        ? '📊 收合市場投注趨勢 ▴'
+        : '📊 查看市場投注趨勢 ▾';
+
+      statsToggle.setAttribute(
+        'aria-expanded',
+        String(expanded)
+      );
+
+      if (expanded) {
+        statsContent.replaceChildren(renderStats(m));
+      } else {
+        statsContent.replaceChildren();
+      }
+    }
+
+    statsToggle.addEventListener('click', () => {
+      if (expandedMarketStats.has(m.id)) {
+        expandedMarketStats.delete(m.id);
+      } else {
+        expandedMarketStats.add(m.id);
+      }
+
+      refreshStatsDisplay();
+    });
+
+    refreshStatsDisplay();
+
+    card.append(statsToggle, statsContent);
     box.append(card);
   }
 }
@@ -915,6 +988,7 @@ onAuthStateChanged(auth, async u => {
 cleanup();
 stopAdminStats();
 stopCoinGrantListeners();
+expandedMarketStats.clear();
 
   user = u;
   profile = null;
@@ -952,14 +1026,15 @@ stopCoinGrantListeners();
 
       if (!snapshot.exists()) {
         tx.set(userRef, {
-          name: (
-            u.displayName || '熊貓玩家'
-          ).slice(0, 80),
-          balance: 10000,
-          lastBetId: '',
-          lastSettleId: '',
-          createdAt: serverTimestamp()
-        });
+  name: (
+    u.displayName || '熊貓玩家'
+  ).slice(0, 80),
+  balance: 10000,
+  lastBetId: '',
+  lastSettleId: '',
+  lastGrantId: '',
+  createdAt: serverTimestamp()
+});
       }
     });
 
