@@ -651,6 +651,11 @@ button:disabled{opacity:.5;cursor:not-allowed}
   flex-wrap: wrap;
 }
 
+/* 全體發放時，金額欄位填滿整行 */
+.coin-grant-grid:has(#grantPlayerField.hidden) {
+  grid-template-columns: 1fr;
+}
+
 @media (max-width: 600px) {
   .coin-grant-grid {
     grid-template-columns: 1fr;
@@ -968,10 +973,17 @@ button:disabled{opacity:.5;cursor:not-allowed}
     僅管理員可操作。每筆補發會同步更新玩家餘額，
     並建立不可刪除的發放紀錄。
   </p>
+<div style="margin:16px 0">
+  <label for="grantMode">發放模式</label>
 
+  <select id="grantMode" class="field">
+    <option value="single">👤 單一玩家</option>
+    <option value="all">👥 全體玩家</option>
+  </select>
+</div>
   <div class="coin-grant-grid">
 
-    <div>
+    <div id="grantPlayerField">
       <label for="grantPlayer">選擇玩家</label>
       <select id="grantPlayer" class="field">
         <option value="">載入玩家中…</option>
@@ -1001,11 +1013,12 @@ button:disabled{opacity:.5;cursor:not-allowed}
   </label>
 
   <input
-    id="grantReason"
-    class="field"
-    maxlength="120"
-    placeholder="例如：熊貓幣補發、活動獎勵"
-  >
+  id="grantReason"
+  class="field"
+  maxlength="120"
+  value="活動獎勵"
+  placeholder="例如：熊貓幣補發、活動獎勵"
+>
 
   <div
     id="grantPreview"
@@ -1024,7 +1037,22 @@ button:disabled{opacity:.5;cursor:not-allowed}
     >
       🪙 確認發放
     </button>
+<button
+  id="grantAllSubmit"
+  class="btn primary hidden"
+  type="button"
+  disabled
+>
+  👥 確認全體發放
+</button>
 
+<button
+  id="grantAllResume"
+  class="btn hidden"
+  type="button"
+>
+  ↻ 繼續未完成的發放
+</button>
     <span
       id="grantStatus"
       class="small"
