@@ -615,6 +615,47 @@ button:disabled{opacity:.5;cursor:not-allowed}
   }
 }
 
+
+/* =====================================
+   熊貓幣發放中心
+   ===================================== */
+
+.coin-grant-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.coin-grant-grid > div {
+  min-width: 0;
+}
+
+.coin-grant-summary {
+  background: #111B2A;
+  border: 1px solid #36465D;
+  border-radius: 12px;
+  padding: 14px;
+  margin: 8px 0 16px;
+  line-height: 1.8;
+}
+
+.coin-grant-history {
+  max-height: 440px;
+  overflow: auto;
+}
+
+.coin-grant-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 600px) {
+  .coin-grant-grid {
+    grid-template-columns: 1fr;
+  }
+}
    
    
 </style>
@@ -914,7 +955,101 @@ button:disabled{opacity:.5;cursor:not-allowed}
 
   </div>
 
-  <h3>賽事管理</h3>
+  
+<!-- =====================================
+     熊貓幣發放中心
+     ===================================== -->
+
+<div class="card" id="coinGrantCenter" style="margin:20px 0">
+
+  <h3>🪙 熊貓幣發放中心</h3>
+
+  <p class="notice">
+    僅管理員可操作。每筆補發會同步更新玩家餘額，
+    並建立不可刪除的發放紀錄。
+  </p>
+
+  <div class="coin-grant-grid">
+
+    <div>
+      <label for="grantPlayer">選擇玩家</label>
+      <select id="grantPlayer" class="field">
+        <option value="">載入玩家中…</option>
+      </select>
+    </div>
+
+    <div>
+      <label for="grantAmount">
+        發放熊貓幣（1～100,000）
+      </label>
+      <input
+        id="grantAmount"
+        class="field"
+        type="number"
+        min="1"
+        max="100000"
+        step="1"
+        value="5000"
+        inputmode="numeric"
+      >
+    </div>
+
+  </div>
+
+  <label for="grantReason">
+    發放原因（必填）
+  </label>
+
+  <input
+    id="grantReason"
+    class="field"
+    maxlength="120"
+    placeholder="例如：熊貓幣補發、活動獎勵"
+  >
+
+  <div
+    id="grantPreview"
+    class="coin-grant-summary"
+  >
+    請選擇玩家並輸入發放金額。
+  </div>
+
+  <div class="coin-grant-actions">
+
+    <button
+      id="grantSubmit"
+      class="btn primary"
+      type="button"
+      disabled
+    >
+      🪙 確認發放
+    </button>
+
+    <span
+      id="grantStatus"
+      class="small"
+      role="status"
+    ></span>
+
+  </div>
+
+  <h3 style="margin-top:26px">
+    📜 最近 50 筆發放紀錄
+  </h3>
+
+  <div
+    id="grantHistory"
+    class="coin-grant-history"
+  >
+    <div class="muted">
+      等待資料載入…
+    </div>
+  </div>
+
+</div>
+
+   
+   <h3>賽事管理</h3>
   <div id="adminMarkets"></div>
 
 </section>
