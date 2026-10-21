@@ -1134,9 +1134,11 @@ expandedMarketStats.clear();
         if (isAdmin) {
   startAdminStats();
   startCoinGrantListeners();
+  renderGrantPreview();
 } else {
   stopAdminStats();
   stopCoinGrantListeners();
+  renderGrantPreview();
 }
       }
     );
@@ -1936,12 +1938,65 @@ setInterval(() => {
 }, 30000);
 
 
+
 /* =====================================
    管理員：熊貓幣發放中心
+   單一玩家／全體玩家
    ===================================== */
 
 let grantUsersUnsub = null;
 let grantHistoryUnsub = null;
+let grantPlayersLoaded = false;
+
+// 每位管理員各自保存未完成的批次
+function bulkGrantStorageKey() {
+  return 'pandaBetBulkGrant_' + (user?.uid || '');
+}
+
+function getPendingBulkGrant() {
+  if (!user) return null;
+
+  try {
+    const raw = localStorage.getItem(bulkGrantStorageKey());
+    if (!raw) return null;
+
+    const batch = JSON.parse(raw);
+
+    if (
+      !batch ||
+      typeof batch.id !== 'string' ||
+      !batch.id ||
+      batch.adminUid !== user.uid ||
+      !Array.isArray(batch.playerIds) ||
+      !batch.playerIds.length ||
+      new Set(batch.playerIds).size !== batch.playerIds.length ||
+      batch.playerIds.some(id => typeof id !== 'string' || !id) ||
+      !Number.isSafeInteger(batch.amount) ||
+      batch.amount < 1 ||
+      batch.amount > 100000 ||
+      typeof batch.reason !== 'string' ||
+      !batch.reason.trim() ||
+      batch.reason.length > 120
+    ) {
+      return null;
+    }
+
+    return batch;
+  } catch {
+    return null;
+  }
+}
+
+function savePendingBulkGrant(batch) {
+  localStorage.setItem(
+    bulkGrantStorageKey(),
+    JSON.stringify(batch)
+  );
+}
+
+function clearPendingBulkGrant() {
+  localStorage.removeItem(bulkGrantStorageKey());
+}
 
 // 玩家下拉選單
 function renderGrantPlayers() {
@@ -1949,8 +2004,12 @@ function renderGrantPlayers() {
   if (!select) return;
 
   const previous = select.value;
+
   select.replaceChildren(
-    new Option('請選擇玩家', '')
+    new Option(
+      grantPlayersLoaded ? '請選擇玩家' : '載入玩家中…',
+      ''
+    )
   );
 
   grantPlayers.forEach(p => {
@@ -1967,8 +2026,16 @@ function renderGrantPlayers() {
   renderGrantPreview();
 }
 
-// 發放前預覽
+// 發放預覽與按鈕狀態
 function renderGrantPreview() {
+  const mode = $('grantMode')?.value || 'single';
+  const all = mode === 'all';
+  const pending = getPendingBulkGrant();
+
+  $('grantPlayerField')?.classList.toggle('hidden', all);
+  $('grantSubmit')?.classList.toggle('hidden', all);
+  $('grantAllSubmit')?.classList.toggle('hidden', !all);
+
   const selected = grantPlayers.find(
     p => p.id === $('grantPlayer')?.value
   );
@@ -1983,32 +2050,99 @@ function renderGrantPreview() {
     amount >= 1 &&
     amount <= 100000;
 
-  const validBalance =
-    selected &&
+  const validReason =
+    reason.length >= 1 &&
+    reason.length <= 120;
+
+  const validSingleBalance =
+    !!selected &&
     Number.isSafeInteger(selected.balance) &&
     selected.balance >= 0 &&
     Number.isSafeInteger(selected.balance + amount);
 
+  const validAllBalances =
+    grantPlayersLoaded &&
+    grantPlayers.length > 0 &&
+    grantPlayers.every(p =>
+      Number.isSafeInteger(p.balance) &&
+      p.balance >= 0 &&
+      Number.isSafeInteger(p.balance + amount)
+    );
+
+  const total = amount * grantPlayers.length;
+  const validTotal = Number.isSafeInteger(total);
+
   const preview = $('grantPreview');
 
   if (preview) {
-    preview.textContent =
-      selected && validAmount && validBalance
-        ? `玩家：${selected.name || '匿名熊貓'}｜原餘額：${money(selected.balance)}｜補發：${money(amount)}｜發放後：${money(selected.balance + amount)}`
-        : '請選擇玩家並輸入 1～100,000 的整數金額。';
+    if (all) {
+      preview.textContent =
+        validAmount && validAllBalances && validTotal
+          ? `👥 發放人數：${fmt(grantPlayers.length)} 人`
+            + `｜每人：${money(amount)}`
+            + `｜總發放：${money(total)}`
+            + `｜原因：${reason || '尚未填寫'}`
+          : '請確認玩家名單及發放金額。';
+    } else {
+      preview.textContent =
+        selected && validAmount && validSingleBalance
+          ? `玩家：${selected.name || '匿名熊貓'}`
+            + `｜原餘額：${money(selected.balance)}`
+            + `｜補發：${money(amount)}`
+            + `｜發放後：${money(selected.balance + amount)}`
+          : '請選擇玩家並輸入 1～100,000 的整數金額。';
+    }
+
+    if (pending) {
+      preview.textContent +=
+        `\n⚠️ 尚有未完成的全體發放批次，請先繼續完成。`;
+      preview.style.whiteSpace = 'pre-line';
+    }
   }
 
-  const button = $('grantSubmit');
-
-  if (button) {
-    button.disabled =
+  const singleButton = $('grantSubmit');
+  if (singleButton) {
+    singleButton.disabled =
       !isAdmin ||
       grantBusy ||
+      !!pending ||
       !selected ||
       !validAmount ||
-      !validBalance ||
-      !reason ||
-      reason.length > 120;
+      !validSingleBalance ||
+      !validReason;
+  }
+
+  const allButton = $('grantAllSubmit');
+  if (allButton) {
+    allButton.disabled =
+      !isAdmin ||
+      grantBusy ||
+      !!pending ||
+      !validAmount ||
+      !validReason ||
+      !validAllBalances ||
+      !validTotal;
+  }
+
+  const resumeButton = $('grantAllResume');
+  if (resumeButton) {
+    resumeButton.classList.toggle(
+      'hidden',
+      !pending || !isAdmin
+    );
+    resumeButton.disabled = grantBusy;
+  }
+
+  if ($('grantMode')) {
+    $('grantMode').disabled = grantBusy || !!pending;
+  }
+
+  if ($('grantAmount')) {
+    $('grantAmount').disabled = grantBusy || !!pending;
+  }
+
+  if ($('grantReason')) {
+    $('grantReason').disabled = grantBusy || !!pending;
   }
 }
 
@@ -2063,6 +2197,7 @@ function stopCoinGrantListeners() {
   }
 
   grantPlayers = [];
+  grantPlayersLoaded = false;
   renderGrantPlayers();
   renderGrantHistory([]);
 }
@@ -2087,11 +2222,14 @@ function startCoinGrantListeners() {
             )
           );
 
+        grantPlayersLoaded = true;
         renderGrantPlayers();
       },
-      error => toast(
-        '玩家名單讀取失敗：' + error.message
-      )
+      error => {
+        grantPlayersLoaded = false;
+        renderGrantPreview();
+        toast('玩家名單讀取失敗：' + error.message);
+      }
     );
   }
 
@@ -2115,25 +2253,129 @@ function startCoinGrantListeners() {
       )
     );
   }
+
+  renderGrantPreview();
+
+  const pending = getPendingBulkGrant();
+  if (pending && $('grantStatus')) {
+    $('grantStatus').textContent =
+      '⚠️ 有尚未完成的全體發放批次';
+  }
 }
 
 // 輸入時即時更新預覽
 [
   'grantPlayer',
   'grantAmount',
-  'grantReason'
+  'grantReason',
+  'grantMode'
 ].forEach(id => {
   $(id)?.addEventListener(
-    id === 'grantPlayer' ? 'change' : 'input',
+    id === 'grantPlayer' || id === 'grantMode'
+      ? 'change'
+      : 'input',
     renderGrantPreview
   );
 });
 
-// 確認發放
+// =====================================
+// 共用：單一玩家安全發放交易
+// =====================================
+
+async function grantCoinsToPlayer({
+  recipientUid,
+  amount,
+  reason,
+  grantId
+}) {
+  if (!user || !isAdmin) {
+    throw Error('管理員權限不足');
+  }
+
+  const adminUid = user.uid;
+  const adminName = (
+    user.displayName || '管理員'
+  ).slice(0, 80);
+
+  const grantRef = doc(db, 'coinGrants', grantId);
+  const playerRef = doc(db, 'users', recipientUid);
+
+  return runTransaction(db, async tx => {
+    // 所有讀取先完成，再執行寫入
+    const [grantSnap, playerSnap] = await Promise.all([
+      tx.get(grantRef),
+      tx.get(playerRef)
+    ]);
+
+    // 相同發放 ID 已存在：避免重複加幣
+    if (grantSnap.exists()) {
+      const existing = grantSnap.data();
+
+      if (
+        existing.recipientUid !== recipientUid ||
+        existing.amount !== amount ||
+        existing.reason !== reason ||
+        existing.adminUid !== adminUid
+      ) {
+        throw Error('發放紀錄 ID 衝突');
+      }
+
+      return 'skipped';
+    }
+
+    if (!playerSnap.exists()) {
+      throw Error(`玩家 ${recipientUid} 的帳戶不存在`);
+    }
+
+    const current = playerSnap.data();
+    const before = current.balance;
+    const after = before + amount;
+
+    if (
+      !Number.isSafeInteger(before) ||
+      before < 0 ||
+      !Number.isSafeInteger(after)
+    ) {
+      throw Error(`玩家 ${recipientUid} 的餘額資料異常`);
+    }
+
+    tx.set(grantRef, {
+      recipientUid,
+      recipientName: String(
+        current.name || '匿名熊貓'
+      ).slice(0, 80),
+      amount,
+      reason,
+      balanceBefore: before,
+      balanceAfter: after,
+      adminUid,
+      adminName,
+      createdAt: serverTimestamp()
+    });
+
+    tx.update(playerRef, {
+      balance: after,
+      lastGrantId: grantRef.id
+    });
+
+    return 'granted';
+  });
+}
+
+// =====================================
+// 單一玩家發放
+// =====================================
+
 $('grantSubmit')?.addEventListener(
   'click',
   async () => {
-    if (!user || !isAdmin || grantBusy) return;
+    if (
+      !user ||
+      !isAdmin ||
+      grantBusy ||
+      getPendingBulkGrant() ||
+      $('grantMode')?.value === 'all'
+    ) return;
 
     const target = grantPlayers.find(
       p => p.id === $('grantPlayer').value
@@ -2156,15 +2398,12 @@ $('grantSubmit')?.addEventListener(
       return;
     }
 
-    const confirmed = confirm(
+    if (!confirm(
       `確定發放 ${fmt(amount)} 熊貓幣給「${target.name || '匿名熊貓'}」？\n原因：${reason}\n此操作不可撤銷。`
-    );
-
-    if (!confirmed) return;
+    )) return;
 
     grantBusy = true;
     renderGrantPreview();
-
     $('grantStatus').textContent = '發放處理中…';
 
     try {
@@ -2172,70 +2411,20 @@ $('grantSubmit')?.addEventListener(
         collection(db, 'coinGrants')
       );
 
-      const playerRef = doc(
-        db,
-        'users',
-        target.id
-      );
-
-      const adminUid = user.uid;
-      const adminName = (
-        user.displayName || '管理員'
-      ).slice(0, 80);
-
-      await runTransaction(db, async tx => {
-        const snap = await tx.get(playerRef);
-
-        if (!snap.exists()) {
-          throw Error('玩家資料不存在');
-        }
-
-        const current = snap.data();
-        const before = current.balance;
-        const after = before + amount;
-
-        if (
-          !Number.isSafeInteger(before) ||
-          before < 0 ||
-          !Number.isSafeInteger(after)
-        ) {
-          throw Error('玩家餘額資料異常');
-        }
-
-        tx.set(grantRef, {
-  recipientUid: target.id,
-  recipientName: String(
-    current.name || '匿名熊貓'
-  ).slice(0, 80),
-          amount,
-          reason,
-          balanceBefore: before,
-          balanceAfter: after,
-          adminUid,
-          adminName,
-          createdAt: serverTimestamp()
-        });
-
-        tx.update(playerRef, {
-          balance: after,
-          lastGrantId: grantRef.id
-        });
+      await grantCoinsToPlayer({
+        recipientUid: target.id,
+        amount,
+        reason,
+        grantId: grantRef.id
       });
 
       $('grantStatus').textContent = '發放成功';
-      $('grantReason').value = '';
+      $('grantReason').value = '活動獎勵';
 
-      toast(
-        `🪙 已發放 ${fmt(amount)} 幣`
-      );
-
+      toast(`🪙 已發放 ${fmt(amount)} 幣`);
     } catch (error) {
       $('grantStatus').textContent = '發放失敗';
-
-      toast(
-        '熊貓幣發放失敗：' + error.message
-      );
-
+      toast('熊貓幣發放失敗：' + error.message);
     } finally {
       grantBusy = false;
       renderGrantPreview();
@@ -2243,6 +2432,184 @@ $('grantSubmit')?.addEventListener(
   }
 );
 
+// =====================================
+// 全體玩家：逐位發放與中斷續發
+// =====================================
+
+async function executeBulkGrant(batch) {
+  if (
+    !user ||
+    !isAdmin ||
+    grantBusy ||
+    batch.adminUid !== user.uid
+  ) return;
+
+  grantBusy = true;
+  renderGrantPreview();
+
+  let granted = 0;
+  let skipped = 0;
+
+  try {
+    for (let i = 0; i < batch.playerIds.length; i++) {
+      if (
+        !user ||
+        !isAdmin ||
+        user.uid !== batch.adminUid
+      ) {
+        throw Error('管理員登入狀態已變更');
+      }
+
+      const uid = batch.playerIds[i];
+
+      $('grantStatus').textContent =
+        `全體發放處理中：${fmt(i + 1)} / ${fmt(batch.playerIds.length)} 人`;
+
+      const result = await grantCoinsToPlayer({
+        recipientUid: uid,
+        amount: batch.amount,
+        reason: batch.reason,
+        grantId: `${batch.id}_${uid}`
+      });
+
+      if (result === 'granted') {
+        granted++;
+      } else {
+        skipped++;
+      }
+    }
+
+    clearPendingBulkGrant();
+
+    $('grantStatus').textContent =
+      `🎉 全體發放完成！本次新增 ${fmt(granted)} 人，已發放略過 ${fmt(skipped)} 人。`;
+
+    toast(
+      `🎉 全體發放完成！每人 ${fmt(batch.amount)} 幣`
+    );
+  } catch (error) {
+    $('grantStatus').textContent =
+      `⚠️ 發放中斷：${error.message}。請點擊「繼續未完成的發放」。`;
+
+    toast('全體發放尚未完成：' + error.message);
+  } finally {
+    grantBusy = false;
+    renderGrantPreview();
+  }
+}
+
+// 確認全體發放
+$('grantAllSubmit')?.addEventListener(
+  'click',
+  async () => {
+    if (
+      !user ||
+      !isAdmin ||
+      grantBusy ||
+      $('grantMode')?.value !== 'all'
+    ) return;
+
+    if (getPendingBulkGrant()) {
+      toast('請先完成上一批全體發放');
+      return;
+    }
+
+    const rawAmount = $('grantAmount').value;
+    const amount = Number(rawAmount);
+    const reason = $('grantReason').value.trim();
+
+    if (
+      rawAmount === '' ||
+      !Number.isSafeInteger(amount) ||
+      amount < 1 ||
+      amount > 100000 ||
+      !reason ||
+      reason.length > 120
+    ) {
+      toast('請確認發放金額與原因');
+      return;
+    }
+
+    if (
+      !grantPlayersLoaded ||
+      grantPlayers.length === 0 ||
+      grantPlayers.some(p =>
+        !Number.isSafeInteger(p.balance) ||
+        p.balance < 0 ||
+        !Number.isSafeInteger(p.balance + amount)
+      )
+    ) {
+      toast('玩家名單或餘額異常，請先檢查');
+      return;
+    }
+
+    const total = amount * grantPlayers.length;
+
+    if (!Number.isSafeInteger(total)) {
+      toast('總發放金額超出安全範圍');
+      return;
+    }
+
+    const confirmed = confirm(
+      `確定發放給全體玩家嗎？\n\n` +
+      `發放人數：${fmt(grantPlayers.length)} 人\n` +
+      `每人金額：${fmt(amount)} 幣\n` +
+      `總發放：${fmt(total)} 幣\n` +
+      `發放原因：${reason}\n\n` +
+      `確認後將逐位發放，已成功的發放不可撤銷。`
+    );
+
+    if (!confirmed) return;
+
+    const batchRef = doc(
+      collection(db, 'coinGrants')
+    );
+
+    const batch = {
+      id: batchRef.id,
+      adminUid: user.uid,
+      amount,
+      reason,
+      playerIds: grantPlayers.map(p => p.id)
+    };
+
+    try {
+      // 發放前先儲存批次
+      savePendingBulkGrant(batch);
+    } catch {
+      toast('無法保存發放批次，已取消操作');
+      return;
+    }
+
+    await executeBulkGrant(batch);
+  }
+);
+
+// 繼續未完成批次
+$('grantAllResume')?.addEventListener(
+  'click',
+  async () => {
+    if (!user || !isAdmin || grantBusy) return;
+
+    const batch = getPendingBulkGrant();
+
+    if (!batch) {
+      toast('目前沒有待完成的發放批次');
+      renderGrantPreview();
+      return;
+    }
+
+    if (!confirm(
+      `繼續上一批全體發放？\n\n` +
+      `原始人數：${fmt(batch.playerIds.length)} 人\n` +
+      `每人金額：${fmt(batch.amount)} 幣\n` +
+      `原因：${batch.reason}\n\n` +
+      `已成功發放的玩家將自動略過。`
+    )) return;
+
+    await executeBulkGrant(batch);
+  }
+);
 
 // =====================================
 // 初始畫面
@@ -2250,3 +2617,4 @@ $('grantSubmit')?.addEventListener(
 
 renderRanking([]);
 update();
+
