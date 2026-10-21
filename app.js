@@ -5,9 +5,9 @@ import {
   signOut, onAuthStateChanged
 } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js';
 import {
-  getFirestore, doc, collection, query, where,
-  orderBy, limit, onSnapshot, runTransaction,
-  serverTimestamp, Timestamp, getDocs, setDoc
+getFirestore, doc, collection, query, where,
+orderBy, limit, onSnapshot, runTransaction,
+serverTimestamp, Timestamp, getDocs, setDoc
 } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js';
 import { firebaseConfig } from './config.js';
 
@@ -48,6 +48,8 @@ let statsPublishing = false;
 let statsQueued = false;
 let publishedSignature = '';
 let toastTimer = null;
+let grantPlayers = [];
+let grantBusy = false;
 
 // =====================================
 // 共用工具
@@ -910,8 +912,9 @@ onAuthStateChanged(auth, async u => {
     return;
   }
 
-  cleanup();
-  stopAdminStats();
+cleanup();
+stopAdminStats();
+stopCoinGrantListeners();
 
   user = u;
   profile = null;
@@ -1054,10 +1057,12 @@ onAuthStateChanged(auth, async u => {
         renderAdmin();
 
         if (isAdmin) {
-          startAdminStats();
-        } else {
-          stopAdminStats();
-        }
+  startAdminStats();
+  startCoinGrantListeners();
+} else {
+  stopAdminStats();
+  stopCoinGrantListeners();
+}
       }
     );
 
@@ -1854,6 +1859,315 @@ function renderAdmin() {
 setInterval(() => {
   if (user) update();
 }, 30000);
+
+
+/* =====================================
+   管理員：熊貓幣發放中心
+   ===================================== */
+
+let grantUsersUnsub = null;
+let grantHistoryUnsub = null;
+
+// 玩家下拉選單
+function renderGrantPlayers() {
+  const select = $('grantPlayer');
+  if (!select) return;
+
+  const previous = select.value;
+  select.replaceChildren(
+    new Option('請選擇玩家', '')
+  );
+
+  grantPlayers.forEach(p => {
+    select.add(new Option(
+      `${p.name || '匿名熊貓'}｜🪙 ${fmt(p.balance)}｜${p.id.slice(0, 8)}…`,
+      p.id
+    ));
+  });
+
+  if (grantPlayers.some(p => p.id === previous)) {
+    select.value = previous;
+  }
+
+  renderGrantPreview();
+}
+
+// 發放前預覽
+function renderGrantPreview() {
+  const selected = grantPlayers.find(
+    p => p.id === $('grantPlayer')?.value
+  );
+
+  const rawAmount = $('grantAmount')?.value ?? '';
+  const amount = Number(rawAmount);
+  const reason = $('grantReason')?.value.trim() || '';
+
+  const validAmount =
+    rawAmount !== '' &&
+    Number.isSafeInteger(amount) &&
+    amount >= 1 &&
+    amount <= 100000;
+
+  const validBalance =
+    selected &&
+    Number.isSafeInteger(selected.balance) &&
+    selected.balance >= 0 &&
+    Number.isSafeInteger(selected.balance + amount);
+
+  const preview = $('grantPreview');
+
+  if (preview) {
+    preview.textContent =
+      selected && validAmount && validBalance
+        ? `玩家：${selected.name || '匿名熊貓'}｜原餘額：${money(selected.balance)}｜補發：${money(amount)}｜發放後：${money(selected.balance + amount)}`
+        : '請選擇玩家並輸入 1～100,000 的整數金額。';
+  }
+
+  const button = $('grantSubmit');
+
+  if (button) {
+    button.disabled =
+      !isAdmin ||
+      grantBusy ||
+      !selected ||
+      !validAmount ||
+      !validBalance ||
+      !reason ||
+      reason.length > 120;
+  }
+}
+
+// 最近 50 筆紀錄
+function renderGrantHistory(records) {
+  const box = $('grantHistory');
+  if (!box) return;
+
+  box.replaceChildren();
+
+  if (!records.length) {
+    box.append(
+      element('div', '目前沒有發放紀錄', 'muted')
+    );
+    return;
+  }
+
+  records.forEach(g => {
+    const row = element('div', null, 'rowline');
+
+    row.append(
+      element(
+        'strong',
+        `${g.recipientName || '匿名熊貓'}｜+${fmt(g.amount)} 幣`
+      ),
+      element(
+        'div',
+        `原餘額 ${fmt(g.balanceBefore)} → 發放後 ${fmt(g.balanceAfter)}｜${g.reason || ''}`,
+        'small'
+      ),
+      element(
+        'div',
+        `管理員：${g.adminName || g.adminUid || '未知'}｜${formatDate(g.createdAt)}`,
+        'small'
+      )
+    );
+
+    box.append(row);
+  });
+}
+
+// 停止監聽
+function stopCoinGrantListeners() {
+  if (grantUsersUnsub) {
+    grantUsersUnsub();
+    grantUsersUnsub = null;
+  }
+
+  if (grantHistoryUnsub) {
+    grantHistoryUnsub();
+    grantHistoryUnsub = null;
+  }
+
+  grantPlayers = [];
+  renderGrantPlayers();
+  renderGrantHistory([]);
+}
+
+// 開始監聽
+function startCoinGrantListeners() {
+  if (!user || !isAdmin) return;
+
+  if (!grantUsersUnsub) {
+    grantUsersUnsub = onSnapshot(
+      collection(db, 'users'),
+      snapshot => {
+        grantPlayers = snapshot.docs
+          .map(d => ({
+            id: d.id,
+            ...d.data()
+          }))
+          .sort((a, b) =>
+            (a.name || '').localeCompare(
+              b.name || '',
+              'zh-Hant'
+            )
+          );
+
+        renderGrantPlayers();
+      },
+      error => toast(
+        '玩家名單讀取失敗：' + error.message
+      )
+    );
+  }
+
+  if (!grantHistoryUnsub) {
+    grantHistoryUnsub = onSnapshot(
+      query(
+        collection(db, 'coinGrants'),
+        orderBy('createdAt', 'desc'),
+        limit(50)
+      ),
+      snapshot => {
+        renderGrantHistory(
+          snapshot.docs.map(d => ({
+            id: d.id,
+            ...d.data()
+          }))
+        );
+      },
+      error => toast(
+        '發放紀錄讀取失敗：' + error.message
+      )
+    );
+  }
+}
+
+// 輸入時即時更新預覽
+[
+  'grantPlayer',
+  'grantAmount',
+  'grantReason'
+].forEach(id => {
+  $(id)?.addEventListener(
+    id === 'grantPlayer' ? 'change' : 'input',
+    renderGrantPreview
+  );
+});
+
+// 確認發放
+$('grantSubmit')?.addEventListener(
+  'click',
+  async () => {
+    if (!user || !isAdmin || grantBusy) return;
+
+    const target = grantPlayers.find(
+      p => p.id === $('grantPlayer').value
+    );
+
+    const rawAmount = $('grantAmount').value;
+    const amount = Number(rawAmount);
+    const reason = $('grantReason').value.trim();
+
+    if (
+      !target ||
+      rawAmount === '' ||
+      !Number.isSafeInteger(amount) ||
+      amount < 1 ||
+      amount > 100000 ||
+      !reason ||
+      reason.length > 120
+    ) {
+      toast('請確認玩家、金額與發放原因');
+      return;
+    }
+
+    const confirmed = confirm(
+      `確定發放 ${fmt(amount)} 熊貓幣給「${target.name || '匿名熊貓'}」？\n原因：${reason}\n此操作不可撤銷。`
+    );
+
+    if (!confirmed) return;
+
+    grantBusy = true;
+    renderGrantPreview();
+
+    $('grantStatus').textContent = '發放處理中…';
+
+    try {
+      const grantRef = doc(
+        collection(db, 'coinGrants')
+      );
+
+      const playerRef = doc(
+        db,
+        'users',
+        target.id
+      );
+
+      const adminUid = user.uid;
+      const adminName = (
+        user.displayName || '管理員'
+      ).slice(0, 80);
+
+      await runTransaction(db, async tx => {
+        const snap = await tx.get(playerRef);
+
+        if (!snap.exists()) {
+          throw Error('玩家資料不存在');
+        }
+
+        const current = snap.data();
+        const before = current.balance;
+        const after = before + amount;
+
+        if (
+          !Number.isSafeInteger(before) ||
+          before < 0 ||
+          !Number.isSafeInteger(after)
+        ) {
+          throw Error('玩家餘額資料異常');
+        }
+
+        tx.set(grantRef, {
+  recipientUid: target.id,
+  recipientName: String(
+    current.name || '匿名熊貓'
+  ).slice(0, 80),
+          amount,
+          reason,
+          balanceBefore: before,
+          balanceAfter: after,
+          adminUid,
+          adminName,
+          createdAt: serverTimestamp()
+        });
+
+        tx.update(playerRef, {
+          balance: after,
+          lastGrantId: grantRef.id
+        });
+      });
+
+      $('grantStatus').textContent = '發放成功';
+      $('grantReason').value = '';
+
+      toast(
+        `🪙 已發放 ${fmt(amount)} 幣`
+      );
+
+    } catch (error) {
+      $('grantStatus').textContent = '發放失敗';
+
+      toast(
+        '熊貓幣發放失敗：' + error.message
+      );
+
+    } finally {
+      grantBusy = false;
+      renderGrantPreview();
+    }
+  }
+);
+
 
 // =====================================
 // 初始畫面
